@@ -1,0 +1,145 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    php_version: 8.2
+    server_hostname: teste.com.br
+    mysql_root_password: "senha-root"
+    mysql_admin_user: usuario-admin
+    mysql_admin_password: "senha-admin"
+    mysql_db_name: laravel
+    user: deployer
+  tasks:
+    - name: Update and upgrade apt packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+        cache_valid_time: 86400
+
+    - name: Install software-properties-common
+      ansible.builtin.apt:
+        name: software-properties-common
+        state: present
+
+    - name: Add Ondrej PHP PPA repository
+      ansible.builtin.apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+
+    - name: Install PHP {{ php_version }} and necessary extensions
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - php{{ php_version }}
+        - php{{ php_version }}-curl
+        - php{{ php_version }}-fpm
+        - php{{ php_version }}-gd
+        - php{{ php_version }}-intl
+        - php{{ php_version }}-mbstring
+        - php{{ php_version }}-mysql
+        - php{{ php_version }}-xml
+        - php{{ php_version }}-zip
+
+    - name: Start and enable PHP-FPM
+      ansible.builtin.systemd_service:
+        name: php{{ php_version }}-fpm
+        state: started
+        enabled: yes
+
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Start and enable Nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Install MySQL Server
+      ansible.builtin.apt:
+        name:
+          - mysql-server
+          - mysql-client
+          - python3-pymysql
+        state: present
+
+    - name: Start and enable MySQL
+      ansible.builtin.systemd_service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Set root password
+      community.mysql.mysql_user:
+        name: root
+        host_all: yes
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        priv: "*.*:ALL,GRANT"
+
+    - name: Create .my.cnf file with root credentials
+      ansible.builtin.copy:
+        dest: /root/.my.cnf
+        content: |
+          [client]
+          user=root
+          password="{{ mysql_root_password }}"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Remove anonymous users
+      community.mysql.mysql_user:
+        name: ""
+        host_all: yes
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Remove test database
+      community.mysql.mysql_db:
+        name: test
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Create admin user with remote access
+      community.mysql.mysql_user:
+        name: "{{ mysql_admin_user }}"
+        password: "{{ mysql_admin_password }}"
+        priv: '*.*:ALL'
+        host: '%'
+        append_privs: yes
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: creating database
+      community.mysql.mysql_db:
+        name: "{{ mysql_db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Add the user "{{ user }}" and generate ssh key
+      ansible.builtin.user:
+        name: "{{ user }}"
+        comment: Deployer User
+        generate_ssh_key: yes
+
+    - name: Install acl
+      ansible.builtin.apt:
+        name: acl
+        state: present
+
+    - name: Grant read-write-execute permissions to "{{ user }}" user for directory /var/www
+      ansible.posix.acl:
+        path: /var/www
+        entity: "{{ user }}"
+        etype: user
+        permissions: rwx
+        recursive: true
+        state: present

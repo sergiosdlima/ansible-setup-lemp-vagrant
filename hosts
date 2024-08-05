@@ -1,0 +1,5 @@
+[devel]
+# 144.202.24.46 ansible_user=root
+
+[local]
+10.10.10.30 ansible_user=vagrant ansible_ssh_private_key_file=.vagrant/machines/default/virtualbox/private_key
