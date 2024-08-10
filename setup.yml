@@ -3,11 +3,13 @@
   become: yes
   vars:
     php_version: 8.2
-    server_hostname: teste.com.br
+    composer_version: 2.7.7
     mysql_root_password: "senha-root"
     mysql_admin_user: usuario-admin
     mysql_admin_password: "senha-admin"
     mysql_db_name: laravel
+    domain_name: teste.com.br
+    app_name: teste
     user: deployer
   tasks:
     - name: Update and upgrade apt packages
@@ -28,24 +30,32 @@
 
     - name: Install PHP {{ php_version }} and necessary extensions
       ansible.builtin.apt:
-        name: "{{ item }}"
+        name:
+          - php{{ php_version }}
+          - php{{ php_version }}-curl
+          - php{{ php_version }}-fpm
+          - php{{ php_version }}-gd
+          - php{{ php_version }}-intl
+          - php{{ php_version }}-mbstring
+          - php{{ php_version }}-mysql
+          - php{{ php_version }}-xml
+          - php{{ php_version }}-zip
         state: present
-      loop:
-        - php{{ php_version }}
-        - php{{ php_version }}-curl
-        - php{{ php_version }}-fpm
-        - php{{ php_version }}-gd
-        - php{{ php_version }}-intl
-        - php{{ php_version }}-mbstring
-        - php{{ php_version }}-mysql
-        - php{{ php_version }}-xml
-        - php{{ php_version }}-zip
 
     - name: Start and enable PHP-FPM
       ansible.builtin.systemd_service:
         name: php{{ php_version }}-fpm
         state: started
         enabled: yes
+
+    - name: Check if Composer is installed (ignore if fails)
+      ansible.builtin.stat:
+        path: /usr/local/bin/composer
+      register: composer_installed
+
+    - name: Download and install Composer globally
+      ansible.builtin.shell: curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --version={{ composer_version }}
+      when: not composer_installed.stat.exists
 
     - name: Install Nginx
       ansible.builtin.apt:
@@ -128,12 +138,65 @@
       ansible.builtin.user:
         name: "{{ user }}"
         comment: Deployer User
+        shell: /bin/bash
         generate_ssh_key: yes
+        ssh_key_type: ed25519
+        ssh_key_bits: 4096
+      register: client_user
+
+    - name: Fetch public ssh key from ssh client
+      fetch:
+        src: "{{ client_user.home }}/.ssh/id_ed25519.pub"
+        dest: "{{ playbook_dir }}/id_{{ user }}_on_{{ domain_name }}.pub"
+        flat: yes
+
+    - name: Fetch private ssh key from ssh client
+      fetch:
+        src: "{{ client_user.home }}/.ssh/id_ed25519"
+        dest: "{{ playbook_dir }}/id_{{ user }}_on_{{ domain_name }}"
+        flat: yes
+
+    - name: Copy the content of public key of "{{ user }}" user to authorized_keys
+      authorized_key:
+        user: "{{ user }}"
+        state: present
+        key: "{{ lookup('file', playbook_dir + '/id_' + user + '_on_' + domain_name + '.pub') }}"
+
+    # - name: Set authorized key for user "{{ user }}" copying it from current user
+    #   authorized_key:
+    #     user: "{{ user }}"
+    #     state: present
+    #     key: "{{ lookup('file', lookup('env','HOME') + '/.ssh/id_ed25519.pub') }}"
+
+    - name: Add the user "{{ user }}" to group www-data
+      ansible.builtin.user:
+        name: "{{ user }}"
+        groups: www-data
+
+    - name: Check if application directory exists
+      ansible.builtin.stat:
+        path: "/var/www/{{ app_name }}"
+      register: app_directory
+
+    - name: Set up application directory structure
+      file:
+        path: "/var/www/{{ app_name }}"
+        state: directory
+        owner: "{{ user }}"
+        group: www-data
+        mode: 0755
+      when: not app_directory.stat.exists
+
+    # - name: Deploy application code (example, adjust as necessary)
+    #   git:
+    #     repo: 'https://github.com/your/repo.git'
+    #     dest: "/var/www/{{ app_name }}"
 
     - name: Install acl
       ansible.builtin.apt:
         name: acl
         state: present
+      when: not app_directory.stat.exists
 
     - name: Grant read-write-execute permissions to "{{ user }}" user for directory /var/www
       ansible.posix.acl:
@@ -143,3 +206,66 @@
         permissions: rwx
         recursive: true
         state: present
+      when: not app_directory.stat.exists
+
+    - name: Change the owner and group for directory /var/www
+      ansible.builtin.command:
+        cmd: "chown -R {{ user }}:www-data /var/www/"
+      when: not app_directory.stat.exists
+
+    - name: Register all directories under /var/www
+      ansible.builtin.find:
+        paths: /var/www/
+        recurse: yes
+        file_type: directory
+      register: directories
+      when: not app_directory.stat.exists
+
+    - name: Set chmod g+s (bit SetGID) for directories under /var/www
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: g+s
+        state: directory
+      loop: "{{ directories.files }}"
+      when: not app_directory.stat.exists
+
+    - name: Configure firewall to allow ssh traffic with limit rate
+      community.general.ufw:
+        rule: limit
+        port: ssh
+        proto: tcp
+
+    - name: Configure firewall to allow Nginx traffic
+      community.general.ufw:
+        rule: allow
+        name: "Nginx Full"
+
+    - name: Enable firewall
+      community.general.ufw:
+        state: enabled
+
+    - name: Disable the Nginx default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify:
+        - reload nginx
+
+    - name: Configure Nginx for PHP-FPM
+      template:
+        src: nginx-template.conf.j2
+        dest: "/etc/nginx/sites-available/{{ app_name }}"
+
+    - name: Enable Nginx for PHP-FPM site
+      file:
+        src: "/etc/nginx/sites-available/{{ app_name }}"
+        dest: "/etc/nginx/sites-enabled/{{ app_name }}"
+        state: link
+      notify:
+        - reload nginx
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
