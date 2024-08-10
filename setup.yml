@@ -23,6 +23,13 @@
         name: software-properties-common
         state: present
 
+    - name: Install Nodejs and NPM
+      ansible.builtin.apt:
+        name: 
+          - nodejs
+          - npm
+        state: present
+
     - name: Add Ondrej PHP PPA repository
       ansible.builtin.apt_repository:
         repo: ppa:ondrej/php
